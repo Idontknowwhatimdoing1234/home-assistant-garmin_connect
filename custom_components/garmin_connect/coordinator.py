@@ -315,9 +315,75 @@ class ActivityCoordinator(BaseGarminCoordinator):
 
     data_name = "activity"
 
+    # DEBUG (fork only): one-shot dump of the Coach plan responses.
+    _debug_done = False
+
     async def _fetch(self) -> dict[str, Any]:
         """Fetch activity data."""
-        return await self.client.fetch_activity_data()
+        data = await self.client.fetch_activity_data()
+        if not ActivityCoordinator._debug_done:
+            ActivityCoordinator._debug_done = True
+            await self._debug_dump(data)
+        return data
+
+    async def _debug_dump(self, data: dict[str, Any]) -> None:
+        """Log raw calendar items, plan list and adaptive plan detail."""
+        import json  # local import: debug code only
+
+        def log_json(name: str, obj: Any) -> None:
+            # default=str covers dates/datetimes the library may return
+            raw = json.dumps(obj, default=str, ensure_ascii=False)
+            teile = [raw[i : i + 3000] for i in range(0, len(raw), 3000)] or [""]
+            for nr, teil in enumerate(teile, 1):
+                _LOGGER.warning(
+                    "GARMIN_DEBUG %s part %d/%d: %s", name, nr, len(teile), teil
+                )
+
+        heute = self.client.today()
+
+        # 1. Raw calendar items (the library trims these before HA sees them)
+        try:
+            kalender = await self.client.get_scheduled_workouts(
+                heute.year, heute.month
+            )
+            items = [
+                item
+                for item in (kalender.get("calendarItems") or [])
+                if item.get("itemType") in ("workout", "fbtAdaptiveWorkout")
+                and (item.get("date") or "")
+                in (heute.isoformat(), (heute + timedelta(days=1)).isoformat())
+            ]
+            log_json("calendar_items", items)
+        except Exception as err:  # noqa: BLE001 - debug code must not raise
+            _LOGGER.warning("GARMIN_DEBUG calendar_items failed: %r", err)
+
+        # 2. Training plan list
+        try:
+            log_json("training_plans", await self.client.get_training_plans())
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("GARMIN_DEBUG training_plans failed: %r", err)
+
+        # 3. Adaptive plan detail for today's plan id
+        plan_id = (data.get("todayScheduledWorkout") or {}).get("trainingPlanId")
+        if not plan_id:
+            plan_id = next(
+                (
+                    w.get("trainingPlanId")
+                    for w in data.get("scheduledWorkouts") or []
+                    if w.get("trainingPlanId")
+                ),
+                None,
+            )
+        if plan_id:
+            try:
+                log_json(
+                    "adaptive_plan",
+                    await self.client.get_adaptive_training_plan_by_id(plan_id),
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("GARMIN_DEBUG adaptive_plan failed: %r", err)
+        else:
+            _LOGGER.warning("GARMIN_DEBUG no trainingPlanId found")
 
 
 class TrainingCoordinator(BaseGarminCoordinator):
