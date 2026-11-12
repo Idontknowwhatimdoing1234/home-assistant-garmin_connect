@@ -34,12 +34,30 @@ def _event_from_workout(workout: dict[str, Any]) -> CalendarEvent | None:
         start = date.fromisoformat(workout_date)
     except ValueError:
         return None
+    # Line 1: steps if known, else the sport key (unchanged from before).
+    # Then, for Coach sessions, the planned duration and target, one line
+    # each, e.g. "running\n55 min\n151bpm" (see coach_plan.py).
+    lines = steps_summary(workout) or [workout.get("sportTypeKey") or ""]
+    seconds = workout.get("estimatedDurationInSecs")
+    if isinstance(seconds, int | float) and seconds > 0:
+        lines.append(f"{round(seconds / 60)} min")
+    if workout.get("workoutDescription"):
+        lines.append(str(workout["workoutDescription"]))
+    description = "\n".join(line for line in lines if line) or None
+    # Two Coach sessions on one day can share the calendar id; the
+    # workoutUuid tells them apart.
+    if workout.get("workoutUuid"):
+        uid: str | None = str(workout["workoutUuid"])
+    elif workout.get("id") is not None:
+        uid = str(workout["id"])
+    else:
+        uid = None
     return CalendarEvent(
         start=start,
         end=start + timedelta(days=1),
         summary=workout.get("title") or "Scheduled workout",
-        description="\n".join(steps_summary(workout)) or workout.get("sportTypeKey"),
-        uid=str(workout["id"]) if workout.get("id") is not None else None,
+        description=description,
+        uid=uid,
     )
 
 
@@ -72,12 +90,14 @@ def _event_from_goal(goal: dict[str, Any]) -> CalendarEvent | None:
 def _with_steps(data: dict[str, Any], workout: dict[str, Any]) -> dict[str, Any]:
     """Return today's or the next workout, which carry steps, for the same item."""
     for detailed in (data.get("todayScheduledWorkout"), data.get("nextScheduledWorkout")):
+        # id alone is not enough: two Coach sessions can share it.
         if (
             isinstance(detailed, dict)
             and detailed.get("id") is not None
             and detailed.get("id") == workout.get("id")
+            and detailed.get("title") == workout.get("title")
         ):
-            return detailed
+            return {**workout, **{k: v for k, v in detailed.items() if v is not None}}
     return workout
 
 

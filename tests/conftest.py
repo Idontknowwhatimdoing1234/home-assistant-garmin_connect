@@ -65,6 +65,10 @@ def mock_client() -> Generator[MagicMock]:
         client.fetch_blood_pressure_data = AsyncMock(return_value=mock_blood_pressure_data())
         client.fetch_menstrual_data = AsyncMock(return_value=mock_menstrual_data())
         client.fetch_nutrition_data = AsyncMock(return_value=mock_nutrition_data())
+        # Coach plan merge (ActivityCoordinator): empty by default, so the
+        # library data above passes through unchanged.
+        client.get_scheduled_workouts = AsyncMock(return_value={})
+        client.get_adaptive_training_plan_by_id = AsyncMock(return_value={})
         yield client
 
 

@@ -970,7 +970,9 @@ async def test_invalid_input_rejected_before_handler(
     """The registered schema rejects bad input before anything reaches Garmin."""
     with pytest.raises(vol.Invalid):
         await _call(hass, service, data)
-    assert not [c for c in mock_client.mock_calls if not c[0].startswith(("fetch_", "today"))]
+    # Polling calls are fine; the Coach plan merge polls these two as well.
+    polling = ("fetch_", "today", "get_scheduled_workouts", "get_adaptive_training_plan_by_id")
+    assert not [c for c in mock_client.mock_calls if not c[0].startswith(polling)]
 
 
 async def test_get_day_summary_requires_response(

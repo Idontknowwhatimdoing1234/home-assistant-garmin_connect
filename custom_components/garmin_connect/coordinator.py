@@ -21,6 +21,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .coach_plan import enrich_detailed, merge_coach_plan, plan_id_from_items
 from .const import (
     CONF_CLIENT_ID,
     CONF_REFRESH_TOKEN,
@@ -315,9 +316,76 @@ class ActivityCoordinator(BaseGarminCoordinator):
 
     data_name = "activity"
 
+    # The adaptive plan changes at most a few times a day; refetch it hourly.
+    _PLAN_MAX_AGE = timedelta(hours=1)
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize, with an empty plan cache."""
+        super().__init__(*args, **kwargs)
+        # (plan id, fetched at, plan detail)
+        self._plan_cache: tuple[int, Any, dict[str, Any]] | None = None
+
     async def _fetch(self) -> dict[str, Any]:
-        """Fetch activity data."""
-        return await self.client.fetch_activity_data()
+        """Fetch activity data, then merge in Garmin Coach plan detail."""
+        data = await self.client.fetch_activity_data()
+        await self._add_coach_plan(data)
+        return data
+
+    async def _add_coach_plan(self, data: dict[str, Any]) -> None:
+        """Add duration/target of Coach sessions and keep same-id sessions.
+
+        See coach_plan.py for why. Best effort: if the extra calls fail,
+        the library's data is left as it is. Auth errors still propagate,
+        so they trigger reauth like any other fetch.
+        """
+        today = self.client.today()
+        next_month = date(today.year + today.month // 12, today.month % 12 + 1, 1)
+
+        # Raw calendar items (the library trims workoutUuid and drops
+        # same-id sessions), current and next month like the library does.
+        calendar_items: list[dict[str, Any]] = []
+        try:
+            for month in (today, next_month):
+                view = await self.client.get_scheduled_workouts(month.year, month.month)
+                calendar_items.extend(view.get("calendarItems") or [])
+        except GarminAuthError:
+            raise
+        except GarminConnectError as err:
+            _LOGGER.debug("Training calendar for Coach detail not fetched: %s", err)
+            calendar_items = []
+
+        scheduled = data.get("scheduledWorkouts") or []
+        plan_id = plan_id_from_items(calendar_items, scheduled)
+        plan = await self._adaptive_plan(plan_id) if plan_id else {}
+        if not calendar_items and not plan:
+            return  # nothing to add
+
+        sessions = merge_coach_plan(scheduled, calendar_items, plan, today)
+        data["scheduledWorkouts"] = sessions
+        # All of today's sessions (the library's todayScheduledWorkout holds one).
+        data["todayScheduledWorkouts"] = [s for s in sessions if s.get("date") == today.isoformat()]
+        for key in ("todayScheduledWorkout", "nextScheduledWorkout"):
+            data[key] = enrich_detailed(data.get(key) or {}, sessions)
+
+    async def _adaptive_plan(self, plan_id: int) -> dict[str, Any]:
+        """Return the adaptive plan detail, cached for _PLAN_MAX_AGE."""
+        now = dt_util.utcnow()
+        if (
+            self._plan_cache is not None
+            and self._plan_cache[0] == plan_id
+            and now - self._plan_cache[1] < self._PLAN_MAX_AGE
+        ):
+            return self._plan_cache[2]
+        try:
+            plan = await self.client.get_adaptive_training_plan_by_id(plan_id)
+        except GarminAuthError:
+            raise
+        except GarminConnectError as err:
+            _LOGGER.debug("Adaptive training plan %s not fetched: %s", plan_id, err)
+            # Keep serving a stale plan rather than dropping the durations.
+            return self._plan_cache[2] if self._plan_cache else {}
+        self._plan_cache = (plan_id, now, plan)
+        return plan
 
 
 class TrainingCoordinator(BaseGarminCoordinator):
